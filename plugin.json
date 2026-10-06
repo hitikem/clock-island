@@ -1,0 +1,14 @@
+{
+  "id": "pomodoro-island",
+  "name": "番茄小岛",
+  "version": "1.0.0",
+  "entry_dll": "PomodoroIsland.dll",
+  "api_version": 2,
+  "min_host_version": "2.3.0",
+  "description": "灵动岛上的番茄钟：专注 / 短休 / 长休倒计时，点击岛体打开完整控制台，自动记录今日完成情况。",
+  "author": "hit",
+  "icon_glyph": "\uE916",
+  "homepage": "https://github.com/hit/pomodoro-island",
+  "license": "MIT",
+  "tags": ["pomodoro", "timer", "focus", "productivity"]
+}
