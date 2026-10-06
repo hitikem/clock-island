@@ -1,14 +1,14 @@
 {
   "id": "pomodoro-island",
-  "name": "番茄小岛",
+  "name": "鏃堕挓宀?,
   "version": "1.0.0",
   "entry_dll": "PomodoroIsland.dll",
   "api_version": 2,
   "min_host_version": "2.3.0",
-  "description": "灵动岛上的番茄钟：专注 / 短休 / 长休倒计时，点击岛体打开完整控制台，自动记录今日完成情况。",
-  "author": "hit",
+  "description": "鐏靛姩宀涗笂鐨勭暘鑼勯挓 + 闅忔墜鍊掕鏃讹細浼氭紡娌欎細缈昏浆鐨勭煝閲忔矙婕忥紝鐐瑰嚮宀涗綋鎵撳紑鐧借壊鎺у埗鍙帮紝鑷姩璁板綍浠婃棩瀹屾垚鎯呭喌銆?,
+  "author": "hitkem",
   "icon_glyph": "\uE916",
-  "homepage": "https://github.com/hit/pomodoro-island",
+  "homepage": "https://github.com/hitikem/clock-island",
   "license": "MIT",
   "tags": ["pomodoro", "timer", "focus", "productivity"]
 }
