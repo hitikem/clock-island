@@ -34,6 +34,11 @@
   <ItemGroup>
     <None Update="plugin.json" CopyToOutputDirectory="PreserveNewest" />
     <None Update="README.md" CopyToOutputDirectory="PreserveNewest" />
+    <!-- 内置闹铃音频：随插件一起拷进插件目录，播放时按文件名找 -->
+    <None Update="*.ogg" CopyToOutputDirectory="PreserveNewest" />
+    <None Update="*.wav" CopyToOutputDirectory="PreserveNewest" />
+    <None Update="*.m4a" CopyToOutputDirectory="PreserveNewest" />
+    <None Update="*.mp3" CopyToOutputDirectory="PreserveNewest" />
   </ItemGroup>
 
   <!-- 构建后：把插件文件拷进宿主 plugins\<id>\ 目录（宿主的运行时文件不拷） -->
