@@ -30,6 +30,9 @@ public sealed class PomodoroPlugin : IslandPluginBase
     private const string KeyPriority = "priority";
     private const int DefaultPriority = 60;
 
+    /// <summary>闹铃音：内置小米「白日梦」/ vivo / OPPO「新世界」/ 苹果「雷达」，以及系统提示音。</summary>
+    private const string KeyAlarm = "alarm";
+
     private static readonly string[] SettingKeys =
     {
         PomodoroEngine.KeyFocusMin,
@@ -41,6 +44,7 @@ public sealed class PomodoroPlugin : IslandPluginBase
         PomodoroEngine.KeyNotify,
         CountdownTimer.KeyMinutes,
         CountdownTimer.KeyLabel,
+        KeyAlarm,
     };
 
     private PomodoroStore _store = null!;
@@ -48,15 +52,17 @@ public sealed class PomodoroPlugin : IslandPluginBase
     private CountdownTimer _countdown = null!;
     private PomodoroIslandView? _view;
     private PomodoroSpotlightView? _spotlight;
+    private AlarmPlayer? _alarmPlayer;
     private bool _wired;
     private bool _stopped;
     private bool _lastCountdownRunning;
 
     protected override Task OnInitializeAsync()
     {
+        _alarmPlayer ??= new AlarmPlayer(message => Log.Warn(message));
+
         Log.Info($"启动：{Manifest.Id} {Manifest.Version}，插件目录 {PluginDirectory}");
         _stopped = false;
-
         _store = new PomodoroStore(PluginDirectory, message => Log.Warn(message));
         _engine = new PomodoroEngine(Context, _store);
         _countdown = new CountdownTimer(Context);
@@ -65,6 +71,8 @@ public sealed class PomodoroPlugin : IslandPluginBase
         PomodoroIslandView.Trace = message => Log.Info(message);
         _view ??= new PomodoroIslandView(Manifest, Theme, _engine, _countdown);
         _view.Attach(_engine, _countdown);
+        _view.AlarmDismissed -= OnAlarmDismissed;
+        _view.AlarmDismissed += OnAlarmDismissed;
         _spotlight?.Attach(_engine, _countdown);
 
         _engine.Changed -= RefreshViews;
@@ -76,6 +84,11 @@ public sealed class PomodoroPlugin : IslandPluginBase
         _countdown.Changed += RefreshViews;
         _countdown.Finished -= OnCountdownFinished;
         _countdown.Finished += OnCountdownFinished;
+
+        // 闹铃响起来 / 停下来时，让岛上那颗「关闭铃声」按钮跟着出现或消失
+        _alarmPlayer ??= new AlarmPlayer(message => Log.Warn(message));
+        _alarmPlayer.RingingChanged -= OnRingingChanged;
+        _alarmPlayer.RingingChanged += OnRingingChanged;
 
         if (!_wired)
         {
@@ -119,9 +132,11 @@ public sealed class PomodoroPlugin : IslandPluginBase
         _engine.Changed -= RefreshViews;
         _countdown.Finished -= OnCountdownFinished;
         _countdown.Changed -= RefreshViews;
+        if (_alarmPlayer is not null) _alarmPlayer.RingingChanged -= OnRingingChanged;
 
         _engine.Stop();          // 顺手把统计落盘
         _countdown.Stop();
+        _alarmPlayer?.Dispose();  // 停用时把闹铃播放器放掉，别留后台声音
         _wired = false;
         SetContent(null);
         return Task.CompletedTask;
@@ -175,6 +190,9 @@ public sealed class PomodoroPlugin : IslandPluginBase
             var vm = BuildViewModel();
             _view?.Apply(vm);
             _spotlight?.Apply(vm);
+
+            // 闹铃响着的时候，岛上给一颗「关闭铃声」按钮
+            if (_view is not null) _view.IsRinging = _alarmPlayer?.IsRinging == true;
         }
         catch (Exception ex)
         {
@@ -283,6 +301,34 @@ public sealed class PomodoroPlugin : IslandPluginBase
         });
     }
 
+    /// <summary>用户点了岛上的「关闭铃声」：立刻静音并刷新界面。</summary>
+    private void OnAlarmDismissed()
+    {
+        try
+        {
+            _alarmPlayer?.StopRinging();
+            RefreshViews();
+        }
+        catch (Exception ex)
+        {
+            Log.Warn($"关闭铃声失败（已忽略）：{ex.Message}");
+        }
+    }
+
+    /// <summary>闹铃开始响 / 停下来：刷新岛上那颗「关闭铃声」按钮。</summary>
+    private void OnRingingChanged()
+    {
+        if (_stopped) return;
+        try
+        {
+            RefreshViews();
+        }
+        catch (Exception ex)
+        {
+            Log.Warn($"刷新响铃状态失败（已忽略）：{ex.Message}");
+        }
+    }
+
     /// <summary>提示音 + 岛上消息（两处结束回调共用）。</summary>
     private void Notify(Func<(string Title, string Text)> build)
     {
@@ -331,15 +377,28 @@ public sealed class PomodoroPlugin : IslandPluginBase
     [DllImport("user32.dll", SetLastError = false)]
     private static extern bool MessageBeep(uint uType);
 
+    // 文件选择框要一个父窗口句柄（非打包应用的要求）
+    [DllImport("user32.dll")]
+    private static extern IntPtr GetForegroundWindow();
+
+    /// <summary>
+    /// 到点响铃：播设置在用的那个闹铃（小米「白日梦」/ vivo / OPPO「新世界」/ 苹果「雷达」）。
+    /// 音频文件找不到或播不出来时，<see cref="AlarmPlayer"/> 会自动退回系统提示音。
+    /// </summary>
     private void PlayChime()
     {
         try
         {
-            MessageBeep(0x00000040);
+            var alarmId = Settings.Get(KeyAlarm, AlarmSounds.DefaultId);
+            var path = AlarmSounds.Resolve(PluginDirectory, alarmId);
+
+            // 不 await：这里是 UI 线程的结束回调，响铃不该把界面卡住
+            _ = _alarmPlayer?.PlayAsync(path);
         }
         catch (Exception ex)
         {
             Log.Warn($"提示音播放失败（已忽略）：{ex.Message}");
+            try { MessageBeep(0x00000040); } catch { /* 连系统音都失败就算了 */ }
         }
     }
 
@@ -399,7 +458,8 @@ public sealed class PomodoroPlugin : IslandPluginBase
         panel.Children.Add(Section("提醒"));
         panel.Children.Add(Card(Stack(
             ToggleRow("自动开始下一段", "专注结束直接进休息，不用手动点", PomodoroEngine.KeyAutoStart, true),
-            ToggleRow("结束提示音", "到点响一声系统提示音", PomodoroEngine.KeySound, true),
+            ToggleRow("结束提示音", "到点响一声", PomodoroEngine.KeySound, true),
+            AlarmRow(),
             ToggleRow("结束时在岛上弹提示", "岛会临时显示一条提醒", PomodoroEngine.KeyNotify, true))));
 
         panel.Children.Add(Section("显示"));
@@ -593,6 +653,132 @@ public sealed class PomodoroPlugin : IslandPluginBase
         };
         button.Click += (_, _) => onClick();
         return button;
+    }
+
+    /// <summary>
+    /// 一行闹铃选择：下拉挑内置闹铃（各厂商默认铃），旁边「试听」按钮立刻放一遍。
+    /// 具体播放交给 <see cref="AlarmPlayer"/>，播不出来会自动退回系统提示音。
+    /// </summary>
+    private FrameworkElement AlarmRow()
+    {
+        var combo = new ComboBox
+        {
+            FontFamily = PomodoroUi.UiFont,
+            FontSize = 14,
+            MinWidth = 190,
+        };
+
+        var ids = new List<string>();
+        foreach (var (id, title, _) in AlarmSounds.Options(PluginDirectory, message => Log.Warn(message)))
+        {
+            ids.Add(id);
+            combo.Items.Add(new ComboBoxItem
+            {
+                Content = title,
+                FontFamily = PomodoroUi.UiFont,
+                FontSize = 14,
+            });
+        }
+
+        var current = Settings.Get(KeyAlarm, AlarmSounds.DefaultId);
+        var index = ids.FindIndex(id => string.Equals(id, current, StringComparison.OrdinalIgnoreCase));
+        combo.SelectedIndex = index >= 0 ? index : 0;
+
+        combo.SelectionChanged += (_, _) =>
+        {
+            if (_loading) return;
+            var i = combo.SelectedIndex;
+            if (i < 0 || i >= ids.Count) return;
+            if (string.Equals(Settings.Get(KeyAlarm, AlarmSounds.DefaultId), ids[i], StringComparison.Ordinal)) return;
+            Settings.Set(KeyAlarm, ids[i]);
+        };
+
+        var preview = new Button
+        {
+            Content = "试听",
+            FontFamily = PomodoroUi.UiFont,
+            FontSize = 14,
+            Padding = new Thickness(14, 6, 14, 6),
+            VerticalAlignment = VerticalAlignment.Center,
+        };
+        preview.Click += (_, _) =>
+        {
+            var i = combo.SelectedIndex;
+            var id = i >= 0 && i < ids.Count ? ids[i] : AlarmSounds.DefaultId;
+            _ = _alarmPlayer?.PlayAsync(AlarmSounds.Resolve(PluginDirectory, id));
+        };
+
+        // 「添加音频」：把选中的音频复制进插件目录的 alarms\，然后刷新下拉列表
+        var add = new Button
+        {
+            Content = "添加音频…",
+            FontFamily = PomodoroUi.UiFont,
+            FontSize = 14,
+            Padding = new Thickness(14, 6, 14, 6),
+            VerticalAlignment = VerticalAlignment.Center,
+        };
+        var hint = new TextBlock
+        {
+            FontFamily = PomodoroUi.UiFont,
+            FontSize = 11.5,
+            Opacity = 0.55,
+            TextWrapping = TextWrapping.Wrap,
+            Text = string.Empty,
+        };
+        add.Click += async (_, _) => await PickAlarmFileAsync(hint);
+
+        var control = new StackPanel { Orientation = Orientation.Horizontal, Spacing = 8 };
+        control.Children.Add(combo);
+        control.Children.Add(preview);
+        control.Children.Add(add);
+
+        var outer = new StackPanel { Spacing = 4 };
+        outer.Children.Add(Row("闹铃", "到点响这个（点「试听」马上听；响的时候岛上会出现关闭按钮）", control));
+        outer.Children.Add(hint);
+        return outer;
+    }
+
+    /// <summary>
+    /// 「添加音频…」：弹出系统文件选择框，把用户选的音频复制到插件目录 alarms\ 并设为当前闹铃。
+    /// 各厂商铃声属于版权素材，插件不附带，让用户自己导入。
+    /// </summary>
+    private async Task PickAlarmFileAsync(TextBlock hint)
+    {
+        try
+        {
+            var picker = new Windows.Storage.Pickers.FileOpenPicker();
+            picker.SuggestedStartLocation = Windows.Storage.Pickers.PickerLocationId.MusicLibrary;
+            foreach (var ext in new[] { ".mp3", ".wav", ".ogg", ".m4a", ".wma", ".aac", ".flac" })
+            {
+                picker.FileTypeFilter.Add(ext);
+            }
+
+            // 非打包应用必须先把窗口句柄交给选择器，否则弹不出来。
+            // 插件跑在宿主进程里，拿前台窗口的句柄即可（也就是用户正在操作的 WinIsland 设置窗口）。
+            var hwnd = GetForegroundWindow();
+            if (hwnd != IntPtr.Zero)
+            {
+                WinRT.Interop.InitializeWithWindow.Initialize(picker, hwnd);
+            }
+
+            var file = await picker.PickSingleFileAsync();
+            if (file is null) return;
+
+            var dir = Path.Combine(PluginDirectory, AlarmSounds.UserFolderName);
+            Directory.CreateDirectory(dir);
+
+            var target = Path.Combine(dir, file.Name);
+            File.Copy(file.Path, target, overwrite: true);
+
+            Settings.Set(KeyAlarm, AlarmSounds.CustomPrefix + file.Name);
+            hint.Text = $"已添加：{file.Name}（已设为当前闹铃）";
+            Log.Info($"已导入自定义闹铃：{target}");
+        }
+        catch (Exception ex)
+        {
+            hint.Text = $"添加失败：{ex.Message}";
+            Log.Warn($"添加自定义闹铃失败：{ex.Message}");
+        }
     }
 
     private static Border Card(UIElement child) => new()
