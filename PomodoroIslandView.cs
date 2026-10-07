@@ -24,19 +24,29 @@ namespace PomodoroIsland;
 /// </summary>
 public sealed class PomodoroIslandView : UserControl, IMorphView
 {
-    private const double CompactIconWidth = 18;
+    private const double CompactIconWidth = 20;
     private const double ExpandedIconWidth = 30;
-    private const double CompactTimeSize = 21;
-    private const double ExpandedTimeSize = 36;
-    private const double CompactLabelSize = 11;
-    private const double ExpandedLabelSize = 14;
+    private const double CompactTimeSize = 25;
+    private const double ExpandedTimeSize = 38;
+    private const double CompactLabelSize = 12.5;
+    private const double ExpandedLabelSize = 17;
+    private const double CompactNoteSize = 17;     // 备注（「休息一下」）中文，跟数字看着一样大
     private const double PauseButtonSize = 42;
     private const double CloseButtonSize = 34;
     private const double BackAmplitude = 0.45;
 
-    /// <summary>收起态根元素的最小宽度：没备注时贴近参照图，有备注时给它腾地方。</summary>
-    private const double CompactWidthNoNote = 150;
-    private const double CompactWidthWithNote = 216;
+    /// <summary>
+    /// 收起态根元素的最小宽度：按时间文字的实际宽度算出来。
+    /// 时限拉到 120 分钟时会出现「120:00」这种 6 个字符，写死宽度会把末尾裁掉（「33:5(」就是被裁的），
+    /// 所以每个字符都算进去：等宽数字 + 冒号。
+    /// </summary>
+    private const double CompactPadding = 30;      // 根元素左右内边距 13 + 17
+    private const double DigitWidth = 14.6;        // Bold 25px「微软雅黑 UI」一个数字的宽度（随字号一起调）
+    private const double ColonWidth = 7.9;         // 冒号比数字窄
+    private const double GapToText = 12;           // 图标到文字的间距
+    private const double RightBreath = 14;         // 右侧留白：圆角处不能压字，否则看着被"挡住"
+    private const double CompactWidthNoNote = 150; // 没备注时的兜底宽度（贴近参照图）
+    private const double CompactWidthMax = 280;    // 再长也不撑破岛体的上限
 
     private readonly IIslandTheme _theme;
     private readonly HourglassView _hourglass;
@@ -46,9 +56,11 @@ public sealed class PomodoroIslandView : UserControl, IMorphView
     private readonly TextBlock _note;          // 收起态：图标旁边的备注 / 阶段名
     private readonly StackPanel _textStack;
     private readonly StackPanel _root;
+    private readonly Viewbox _fit;
     private readonly Button _pauseButton;
     private readonly FontIcon _pauseGlyph;
     private readonly Button _closeButton;
+    private readonly Button _muteButton;
 
     // 共享画刷：换主题时只改颜色
     private readonly SolidColorBrush _textBrush = new();
@@ -65,6 +77,7 @@ public sealed class PomodoroIslandView : UserControl, IMorphView
     private bool _hasNote;
     private PomodoroPhase _accentPhase = PomodoroPhase.Focus;
     private bool _themeHooked;
+    private bool _isRinging;
 
     private readonly DispatcherQueueTimer? _morphTimer;
     private DateTimeOffset _morphStart;
@@ -113,7 +126,7 @@ public sealed class PomodoroIslandView : UserControl, IMorphView
             Foreground = _mutedBrush,
         };
 
-        _textStack = new StackPanel { Spacing = 0, Margin = new Thickness(11, 0, 0, 0) };
+        _textStack = new StackPanel { Spacing = 0, Margin = new Thickness(12, 0, 0, 0) };
         _textStack.Children.Add(_time);
         _textStack.Children.Add(_label);
 
@@ -122,12 +135,12 @@ public sealed class PomodoroIslandView : UserControl, IMorphView
         _note = new TextBlock
         {
             Text = "",
-            FontSize = 12,
+            FontSize = CompactNoteSize,
             MaxWidth = 0,
             Opacity = 0,
             TextTrimming = TextTrimming.CharacterEllipsis,
             VerticalAlignment = VerticalAlignment.Center,
-            Margin = new Thickness(8, 0, 0, 0),
+            Margin = new Thickness(9, 0, 2, 0),
             Foreground = _mutedBrush,
         };
 
@@ -153,6 +166,22 @@ public sealed class PomodoroIslandView : UserControl, IMorphView
         _closeButton = MakeCircleButton(closeGlyph, CloseButtonSize, _circleFillBrush, _circleHoverBrush, _transparentBrush, borderThickness: 0);
         _closeButton.Click += (_, _) => ActiveReset();
 
+        // 「关闭铃声」：只在闹铃响着的时候出现，点一下立刻静音（不然到点会一直吵）
+        var muteGlyph = new FontIcon
+        {
+            Glyph = "\uE74F",                 // Mute
+            FontFamily = new FontFamily("Segoe Fluent Icons"),
+            FontSize = 14,
+            Foreground = _textBrush,
+        };
+        _muteButton = MakeCircleButton(muteGlyph, CloseButtonSize, _circleFillBrush, _circleHoverBrush, _transparentBrush, borderThickness: 0);
+        _muteButton.Width = 0;
+        _muteButton.Height = 0;
+        _muteButton.Opacity = 0;
+        _muteButton.IsHitTestVisible = false;
+        ToolTipService.SetToolTip(_muteButton, "关闭铃声");
+        _muteButton.Click += (_, _) => AlarmDismissed?.Invoke();
+
         var row = new StackPanel
         {
             Orientation = Orientation.Horizontal,
@@ -162,18 +191,30 @@ public sealed class PomodoroIslandView : UserControl, IMorphView
         row.Children.Add(_hourglass);
         row.Children.Add(_note);
         row.Children.Add(_textStack);
+        row.Children.Add(_muteButton);
         row.Children.Add(_pauseButton);
         row.Children.Add(_closeButton);
 
         _root = new StackPanel
         {
-            Padding = new Thickness(13, 7, 13, 7),
+            Padding = new Thickness(13, 7, 17, 7),   // 右边多留 4px：文字不贴圆角
             VerticalAlignment = VerticalAlignment.Center,
-            // 收起态：有备注时主动要宽一点，否则宿主按旧宽度摆窗口会把时间裁掉
             MinWidth = CompactWidthNoNote,
         };
         _root.Children.Add(row);
-        Content = _root;   // 视图根元素保持透明，岛体材质由宿主绘制
+
+        // 兜底防裁切：宿主按自己的规则决定胶囊多宽，万一给窄了（时限拉到 120 分钟时会出现
+        // 「120:00」这种 6 个字符），Viewbox 会把整排内容等比缩到可用宽度里 ——
+        // 宁可整体略小一点，也绝不把末尾的数字切掉。
+        _fit = new Viewbox
+        {
+            Stretch = Stretch.Uniform,
+            StretchDirection = StretchDirection.DownOnly,
+            HorizontalAlignment = HorizontalAlignment.Left,
+            VerticalAlignment = VerticalAlignment.Center,
+        };
+        _fit.Child = _root;
+        Content = _fit;   // 视图根元素保持透明，岛体材质由宿主绘制
 
         _morphTimer = DispatcherQueue?.CreateTimer();
         if (_morphTimer is not null)
@@ -198,6 +239,59 @@ public sealed class PomodoroIslandView : UserControl, IMorphView
     }
 
     public UIElement View => this;
+
+    /// <summary>用户点了「关闭铃声」。</summary>
+    public event Action? AlarmDismissed;
+
+    /// <summary>闹铃是否正在响（插件每秒同步一次状态）。</summary>
+    public bool IsRinging
+    {
+        get => _isRinging;
+        set
+        {
+            if (_isRinging == value) return;
+            _isRinging = value;
+            // 响铃时按钮立刻出现（不参与变形动画，免得被动画节奏拖住）
+            if (!_isRinging)
+            {
+                _muteButton.Width = 0;
+                _muteButton.Height = 0;
+                _muteButton.Opacity = 0;
+                _muteButton.IsHitTestVisible = false;
+            }
+            else
+            {
+                _muteButton.Width = CloseButtonSize;
+                _muteButton.Height = CloseButtonSize;
+                _muteButton.Opacity = 1;
+                _muteButton.IsHitTestVisible = true;
+            }
+        }
+    }
+
+    /// <summary>量一段时间文字（「25:00」「120:00」）需要多宽：数字和冒号分开算。</summary>
+    private static double MeasureTimeWidth(string text)
+    {
+        double width = 0;
+        foreach (var ch in text ?? string.Empty)
+        {
+            width += ch is ':' or '：' ? ColonWidth : DigitWidth;
+        }
+        return width <= 0 ? DigitWidth * 5 : width;
+    }
+
+    /// <summary>备注（「看书」这种）占的宽度：中文按 17px 一个字估，英文数字窄一点。</summary>
+    private static double NoteWidth(string note)
+    {
+        if (string.IsNullOrEmpty(note)) return 0;
+
+        double width = 6;   // 前后各留 3px 余量
+        foreach (var ch in note)
+        {
+            width += ch < 128 ? 9.2 : 17.5;
+        }
+        return Math.Min(width, 118);   // 备注太长就交给省略号
+    }
 
     /// <summary>插件重新启用时会新建引擎，这里把视图指过去（视图实例复用，不重复建树）。</summary>
     public void Attach(PomodoroEngine engine, CountdownTimer countdown)
@@ -224,10 +318,18 @@ public sealed class PomodoroIslandView : UserControl, IMorphView
         if (hasNote != _hasNote)
         {
             _hasNote = hasNote;
-            _root.MinWidth = hasNote ? CompactWidthWithNote : CompactWidthNoNote;
+            _root.MinWidth = CompactWidthNoNote;
         }
 
         _note.Text = note;
+
+        // 宽度按时长文字实算：33:50、120:00 这类长文字不再被裁掉末尾。
+        // 右边额外留 RightBreath，避免文字贴到胶囊圆角上（视觉上像被挡住）。
+        var wanted = CompactPadding + CompactIconWidth + GapToText + MeasureTimeWidth(vm.TimeText) + RightBreath;
+        if (hasNote) wanted += NoteWidth(note);
+        if (_isRinging) wanted += CloseButtonSize;      // 响铃时那颗「关闭铃声」也要占地方
+        _root.MinWidth = Math.Clamp(wanted, CompactWidthNoNote, CompactWidthMax);
+        _time.MinWidth = MeasureTimeWidth(vm.TimeText);
 
         _pauseGlyph.Glyph = vm.IsRunning ? "\uE769" : "\uE768";   // 暂停 / 播放
 
